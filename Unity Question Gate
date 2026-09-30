@@ -1,0 +1,198 @@
+#if UNITY_EDITOR
+using System.IO;
+using TMPro;
+using UnityEditor;
+using UnityEditor.Events;
+using UnityEditor.SceneManagement;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
+using UnityEngine.InputSystem.UI;
+#endif
+
+/// <summary>Menu: Tools > Question Gate > Build Prototype Scene. Builds the full playable level + UI.</summary>
+public static class QuestionGateSceneBuilder
+{
+    static Sprite sq;
+
+    // ===== EDIT QUESTIONS HERE (topic: Programming Fundamentals) =====
+    static QuestionData Q(string ctx, string q, int correct, params string[] o) =>
+        new QuestionData { context = ctx, question = q, options = o, correctIndex = correct };
+
+    static QuestionData[] Questions() => new[]
+    {
+        Q("A program stores a player's score so it can change while the game runs.",
+          "What is a variable in programming?", 0,
+          "A named storage location that holds a value which can change", "A fixed value that can never be modified",
+          "An error message shown by the compiler", "A device that runs the program"),
+        Q("A game must repeat an action, such as spawning an enemy, 10 times.",
+          "Which programming construct is designed to repeat a block of code multiple times?", 1,
+          "An if statement", "A loop", "A comment", "An import statement"),
+        Q("A game checks: if health <= 0, show 'Game Over'; otherwise keep playing.",
+          "What does this kind of if / else statement do?", 2,
+          "Runs every line of code twice", "Deletes the health variable",
+          "Chooses which code to run depending on whether a condition is true", "Speeds up the program"),
+        Q("You write a block of code named Jump() that makes a character leap, and you use it in many places.",
+          "What is the main benefit of putting this code in a function?", 3,
+          "It makes the code run on a different computer", "It prevents any errors from ever happening",
+          "It converts the code into an image", "It lets you reuse the same code by calling its name instead of rewriting it"),
+        Q("An inventory holds the items: ['sword', 'shield', 'potion']. Indexing starts at 0 in most languages.",
+          "Which index gives you 'sword', the first item in the array?", 0, "0", "1", "2", "3"),
+    };
+    // =================================================================
+
+    [MenuItem("Tools/Question Gate/Build Prototype Scene")]
+    public static void Build()
+    {
+        var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+        sq = AssetDatabase.GetBuiltinExtraResource<Sprite>("UI/Skin/UISprite.psd");
+
+        // Camera
+        var camGO = new GameObject("Main Camera") { tag = "MainCamera" };
+        var cam = camGO.AddComponent<Camera>();
+        cam.orthographic = true; cam.orthographicSize = 6;
+        cam.clearFlags = CameraClearFlags.SolidColor; cam.backgroundColor = new Color(0.6f, 0.82f, 0.96f);
+        camGO.AddComponent<AudioListener>();
+        camGO.transform.position = new Vector3(0, 2, -10);
+        var follow = camGO.AddComponent<CameraFollow>();
+
+        // World
+        var ground = new Color(0.42f, 0.56f, 0.31f);
+        Make("Ground", new Vector2(28, -0.5f), new Vector2(64, 1), ground);
+        Make("LeftWall", new Vector2(-4.5f, 5), new Vector2(1, 10), ground);
+        Make("RightWall", new Vector2(60.5f, 5), new Vector2(1, 10), ground);
+        var wood = new Color(0.55f, 0.42f, 0.29f);
+        foreach (float x in new[] { 5f, 14f, 23f, 33f, 43f })
+            Make("Platform", new Vector2(x, 1.6f), new Vector2(3, 0.4f), wood);
+
+        // Start point + Player
+        var start = new GameObject("StartPoint"); start.transform.position = new Vector3(0, 1, 0);
+        var pGO = Make("Player", new Vector2(0, 1), new Vector2(0.8f, 1.2f), new Color(0.18f, 0.44f, 0.93f));
+        pGO.tag = "Player";
+        pGO.AddComponent<Rigidbody2D>();
+        var player = pGO.AddComponent<PlayerController>();
+        follow.target = pGO.transform;
+
+        // Gates
+        var qs = Questions();
+        var gates = new QuestionGate[qs.Length];
+        for (int i = 0; i < qs.Length; i++)
+        {
+            var g = Make("Gate_" + (i + 1), new Vector2(10 + i * 10, 4), new Vector2(1, 8), Color.red);
+            var gate = g.AddComponent<QuestionGate>();
+            gate.gateNumber = i + 1;
+            gate.questionData = qs[i];
+            gates[i] = gate;
+        }
+
+        // Finish flag
+        var fin = Make("Finish", new Vector2(56, 1.5f), new Vector2(0.6f, 3), new Color(1f, 0.85f, 0.1f));
+        fin.GetComponent<BoxCollider2D>().isTrigger = true;
+        fin.AddComponent<FinishTrigger>();
+
+        // ---------- UI ----------
+        var cgo = new GameObject("Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+        var canvas = cgo.GetComponent<Canvas>(); canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        var scaler = cgo.GetComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920, 1080); scaler.matchWidthOrHeight = 0.5f;
+
+        var es = new GameObject("EventSystem", typeof(EventSystem));
+#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
+        es.AddComponent<InputSystemUIInputModule>();
+#else
+        es.AddComponent<StandaloneInputModule>();
+#endif
+
+        var hud = Txt(cgo.transform, "HUD", "", 36, new Vector2(0.02f, 0.9f), new Vector2(0.7f, 0.99f), TextAlignmentOptions.Left);
+
+        // Question panel
+        var panel = Panel(cgo.transform, "QuestionPanel", new Vector2(0.15f, 0.08f), new Vector2(0.85f, 0.92f));
+        var title = Txt(panel.transform, "Title", "Gate", 44, new Vector2(0.05f, 0.90f), new Vector2(0.95f, 0.98f));
+        title.color = new Color(1f, 0.85f, 0.3f);
+        var context = Txt(panel.transform, "Context", "", 30, new Vector2(0.05f, 0.77f), new Vector2(0.95f, 0.90f));
+        context.color = new Color(0.8f, 0.85f, 0.9f); context.fontStyle = FontStyles.Italic;
+        var question = Txt(panel.transform, "Question", "", 36, new Vector2(0.05f, 0.62f), new Vector2(0.95f, 0.77f));
+        question.fontStyle = FontStyles.Bold;
+
+        var btns = new Button[4]; var lbls = new TMP_Text[4];
+        for (int i = 0; i < 4; i++)
+        {
+            float top = 0.59f - i * 0.13f;
+            btns[i] = Btn(panel.transform, "Option" + (i + 1), new Vector2(0.06f, top - 0.11f), new Vector2(0.94f, top), out lbls[i]);
+        }
+        var feedback = Txt(panel.transform, "Feedback", "", 34, new Vector2(0.05f, 0.0f), new Vector2(0.95f, 0.08f));
+
+        var uiGO = new GameObject("QuestionUIManager");
+        var ui = uiGO.AddComponent<QuestionUIManager>();
+        ui.panel = panel; ui.titleText = title; ui.contextText = context; ui.questionText = question;
+        ui.feedbackText = feedback; ui.optionButtons = btns; ui.optionLabels = lbls;
+
+        // Completion panel
+        var done = Panel(cgo.transform, "CompletionPanel", new Vector2(0.28f, 0.25f), new Vector2(0.72f, 0.75f));
+        var doneText = Txt(done.transform, "Text", "Level Complete!", 44, new Vector2(0.05f, 0.35f), new Vector2(0.95f, 0.95f));
+        TMP_Text rl;
+        var restartBtn = Btn(done.transform, "RestartButton", new Vector2(0.25f, 0.08f), new Vector2(0.75f, 0.28f), out rl);
+        rl.text = "Play Again"; rl.alignment = TextAlignmentOptions.Center; rl.rectTransform.offsetMin = Vector2.zero;
+
+        // Game manager
+        var gmGO = new GameObject("GameManager");
+        var gm = gmGO.AddComponent<GameManager>();
+        gm.player = player; gm.startPoint = start.transform; gm.gates = gates;
+        gm.completionPanel = done; gm.completionText = doneText; gm.hudText = hud;
+        UnityEventTools.AddPersistentListener(restartBtn.onClick, gm.RestartGame);
+        done.SetActive(false);
+
+        Directory.CreateDirectory("Assets/Scenes");
+        EditorSceneManager.SaveScene(scene, "Assets/Scenes/QuestionGateGame.unity");
+        Selection.activeGameObject = gmGO;
+        Debug.Log("Question Gate scene built: Assets/Scenes/QuestionGateGame.unity — press Play.");
+    }
+
+    static GameObject Make(string name, Vector2 pos, Vector2 size, Color color)
+    {
+        var go = new GameObject(name); go.transform.position = pos;
+        var sr = go.AddComponent<SpriteRenderer>(); sr.sprite = sq; sr.color = color;
+        Vector3 b = sq.bounds.size;
+        go.transform.localScale = new Vector3(size.x / b.x, size.y / b.y, 1f);
+        var col = go.AddComponent<BoxCollider2D>(); col.size = b;
+        return go;
+    }
+
+    static GameObject Panel(Transform parent, string name, Vector2 amin, Vector2 amax)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(Image));
+        go.transform.SetParent(parent, false);
+        go.GetComponent<Image>().color = new Color(0.08f, 0.1f, 0.16f, 0.95f);
+        var r = go.GetComponent<RectTransform>();
+        r.anchorMin = amin; r.anchorMax = amax; r.offsetMin = r.offsetMax = Vector2.zero;
+        return go;
+    }
+
+    static TMP_Text Txt(Transform parent, string name, string text, float size, Vector2 amin, Vector2 amax,
+                        TextAlignmentOptions align = TextAlignmentOptions.Center)
+    {
+        var go = new GameObject(name, typeof(RectTransform));
+        go.transform.SetParent(parent, false);
+        var t = go.AddComponent<TextMeshProUGUI>();
+        t.text = text; t.fontSize = size; t.alignment = align; t.color = Color.white;
+        var r = t.rectTransform;
+        r.anchorMin = amin; r.anchorMax = amax; r.offsetMin = r.offsetMax = Vector2.zero;
+        return t;
+    }
+
+    static Button Btn(Transform parent, string name, Vector2 amin, Vector2 amax, out TMP_Text label)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Button));
+        go.transform.SetParent(parent, false);
+        go.GetComponent<Image>().color = new Color(0.2f, 0.3f, 0.5f);
+        var r = go.GetComponent<RectTransform>();
+        r.anchorMin = amin; r.anchorMax = amax; r.offsetMin = r.offsetMax = Vector2.zero;
+        label = Txt(go.transform, "Label", "", 30, Vector2.zero, Vector2.one, TextAlignmentOptions.Left);
+        label.rectTransform.offsetMin = new Vector2(24, 0);
+        label.rectTransform.offsetMax = new Vector2(-16, 0);
+        return go.GetComponent<Button>();
+    }
+}
+#endif
